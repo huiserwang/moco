@@ -1,0 +1,21 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: run",
+            "type": "python",
+            "cwd": "/home/huiser/Desktop/Codes/moco-main/",
+            "request": "launch",
+            "program": "main_moco.py",
+            // "program": "${file}",
+            "args": ["/home/huiser/ssd/Datasets/ImageNet/ImageNet100", "-a", "resnet50", "--lr", "0.03", "--batch-size", "8", "-j", "8", "--dist-url", "tcp://localhost:10001", "--world-size", "1", "--rank", "0", "--multiprocessing-distributed", "--moco-t", "0.2", "--mlp", "--cos", "--aug-plus"],
+            "console": "integratedTerminal",
+            "python": "/home/huiser/miniconda3/envs/mmdet/bin/python3.7",
+            "justMyCode": false
+
+        },
+    ]
+}
