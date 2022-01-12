@@ -24,6 +24,8 @@ import torchvision.models as models
 
 import moco.loader
 import moco.builder
+from moco.loader import RandomRotationv2 as TransRanRotate
+from moco.loader import Composev2
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -230,6 +232,7 @@ def main_worker(gpu, ngpus_per_node, args):
             transforms.RandomGrayscale(p=0.2),
             transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=0.5),
             transforms.RandomHorizontalFlip(),
+            TransRanRotate((-180,180)),
             transforms.ToTensor(),
             normalize
         ]
@@ -246,7 +249,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     train_dataset = datasets.ImageFolder(
         traindir,
-        moco.loader.TwoCropsTransform(transforms.Compose(augmentation)))
+        moco.loader.TwoCropsTransformv2(Composev2(augmentation)))
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -290,16 +293,20 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     model.train()
 
     end = time.time()
-    for i, (images, _) in enumerate(train_loader):
+    for i, (imagesALL, _) in enumerate(train_loader):
         # measure data loading time
+        images = imagesALL[0]
+        angles = imagesALL[1]
         data_time.update(time.time() - end)
 
         if args.gpu is not None:
             images[0] = images[0].cuda(args.gpu, non_blocking=True)
             images[1] = images[1].cuda(args.gpu, non_blocking=True)
+            angles[0] = angles[0].cuda(args.gpu, non_blocking=True)
+            angles[1] = angles[1].cuda(args.gpu, non_blocking=True)
 
         # compute output
-        output, target = model(im_q=images[0], im_k=images[1])
+        output, target = model(im_q=images[0], im_k=images[1], ang_q=angles[0], ang_k=angles[1])
         loss = criterion(output, target)
 
         # acc1/acc5 are (K+1)-way contrast classifier accuracy

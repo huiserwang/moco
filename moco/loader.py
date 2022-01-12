@@ -5,6 +5,7 @@ from torch import Tensor
 from torchvision.transforms.transforms import RandomRotation
 from torchvision.transforms.functional import InterpolationMode
 from torchvision.transforms import functional as F
+from torchvision.transforms import Compose
 class TwoCropsTransform:
     """Take two random crops of one image as the query and key."""
 
@@ -16,6 +17,16 @@ class TwoCropsTransform:
         k = self.base_transform(x)
         return [q, k]
 
+class TwoCropsTransformv2:
+    """Take two random crops of one image as the query and key."""
+
+    def __init__(self, base_transform):
+        self.base_transform = base_transform
+
+    def __call__(self, x):
+        q, angle_q = self.base_transform(x)
+        k, angle_k = self.base_transform(x)
+        return [q, k], [angle_q, angle_k]
 
 class GaussianBlur(object):
     """Gaussian blur augmentation in SimCLR https://arxiv.org/abs/2002.05709"""
@@ -50,3 +61,15 @@ class RandomRotationv2(RandomRotation):
             return F.rotate(img, angle, self.resample, self.expand, self.center, fill), angle
         else:
             return F.rotate(img, angle, self.resample, self.expand, self.center, fill)
+
+class Composev2(Compose):
+    def __init__(self, transforms):
+        super(Composev2, self).__init__(transforms)
+
+    def __call__(self, img):
+        for t in self.transforms:
+            if isinstance(img, tuple) and len(img)==2:
+                angle = img[1]
+                img = img[0]
+            img = t(img)
+        return img, angle

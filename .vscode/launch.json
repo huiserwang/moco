@@ -7,7 +7,7 @@
         {
             "name": "Python: run",
             "type": "python",
-            "cwd": "/home/huiser/Desktop/Codes/moco-main/",
+            "cwd": "/home/huiser/Desktop/Codes/moco/",
             "request": "launch",
             "program": "main_moco.py",
             // "program": "${file}",

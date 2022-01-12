@@ -184,24 +184,36 @@ class RMoCov1(nn.Module):
 
         if mlp:  # hack: brute-force replacement
             dim_mlp = self.encoder_q.fc.weight.shape[1]
-            self.encoder_q.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_q.fc)
-            self.encoder_k.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_k.fc)
-            self.rproj_q = deepcopy(self.encoder_q.fc)
-            self.rproj_k = deepcopy(self.encoder_k.fc)
+            self.proj_q = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), deepcopy(self.encoder_q.fc))
+            self.proj_k = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), deepcopy(self.encoder_k.fc))
+            self.encoder_q = nn.Sequential(*list(self.encoder_q.children())[:-1])
+            self.encoder_k = nn.Sequential(*list(self.encoder_k.children())[:-1])
+            #self.encoder_q.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_q.fc)
+            #self.encoder_k.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_k.fc)
+
 
         #assign encoder_q's weights to encoder_k
         for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
             param_k.data.copy_(param_q.data)  # initialize
             param_k.requires_grad = False  # not update by gradient
-        for rparam_q, rparam_k in zip(self.rproj_q.parameters(), self.rproj_k.parameters()):
-            rparam_k.data.copy_(rparam_q.data)
-            rparam_k.requires_grad = False
+        for param_pro_q, param_pro_k in zip(self.proj_q.parameters(), self.proj_k.parameters()):
+            param_pro_k.data.copy_(param_pro_q.data)
+            param_pro_k.requires_grad = False
+        self.rproj_q = deepcopy(self.proj_q)
+        self.rproj_k = deepcopy(self.proj_k)
+        #for rparam_q, rparam_k in zip(self.rproj_q.parameters(), self.rproj_k.parameters()):
+            #rparam_k.data.copy_(rparam_q.data)
+            #rparam_k.requires_grad = False
 
         # create the queue
         self.register_buffer("queue", torch.randn(dim, K))
         self.queue = nn.functional.normalize(self.queue, dim=0) #L2_norm is applied to dim channel
+        self.register_buffer("queue_r", torch.randn(dim, K))
+        self.queue_r = nn.functional.normalize(self.queue_r, dim=0) #L2_norm is applied to dim channel
 
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
+
+        self.register_buffer("queue_angle", torch.zeros(K, dtype=torch.float64))
 
     @torch.no_grad()
     def _momentum_update_key_encoder(self):
@@ -210,11 +222,17 @@ class RMoCov1(nn.Module):
         """
         for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
             param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
+        for param_pro_q, param_pro_k, rparam_pro_q, rparam_pro_k in zip(self.proj_q.parameters(),  self.proj_k.parameters(), self.rproj_q.parameters(), self.rproj_k.parameters()):
+            param_pro_k.data = param_pro_k.data * self.m + param_pro_q.data * (1. - self.m)
+            rparam_pro_k.data = rparam_pro_k.data * self.m + rparam_pro_q.data * (1. - self.m)
+        
 
     @torch.no_grad()
-    def _dequeue_and_enqueue(self, keys):
+    def _dequeue_and_enqueue(self, keys, keys_r, keys_r_angle):
         # gather keys before updating queue
         keys = concat_all_gather(keys)
+        keys_r = concat_all_gather(keys_r)
+        keys_r_angle = concat_all_gather(keys_r_angle)
 
         batch_size = keys.shape[0]
 
@@ -223,6 +241,8 @@ class RMoCov1(nn.Module):
 
         # replace the keys at ptr (dequeue and enqueue)
         self.queue[:, ptr:ptr + batch_size] = keys.T
+        self.queue_r[:, ptr:ptr + batch_size] = keys_r.T
+        self.queue_angle[ptr:ptr + batch_size] = keys_r_angle
         ptr = (ptr + batch_size) % self.K  # move pointer
 
         self.queue_ptr[0] = ptr
@@ -274,7 +294,15 @@ class RMoCov1(nn.Module):
 
         return x_gather[idx_this]
 
-    def forward(self, im_q, im_k):
+    @torch.no_grad()
+    def _get_pos_rotation(self, ang, threshold):
+        ang = ang.reshape(-1,1)   #[N,1]
+        match = torch.abs(ang - self.queue_angle.reshape(1,-1).repeat(ang.shape[0],1))
+        match_min, match_idx = torch.min(match, dim=1)
+        keep = torch.where(match_min <= threshold, True, False)
+        return self.queue_r[:,match_idx], match_idx, keep
+
+    def forward(self, im_q, im_k, ang_q, ang_k):
         """
         Input:
             im_q: a batch of query images
@@ -284,8 +312,12 @@ class RMoCov1(nn.Module):
         """
 
         # compute query features
-        q = self.encoder_q(im_q)  # queries: NxC
+        enc_q = self.encoder_q(im_q)  # queries: NxC
+        enc_q = enc_q.squeeze()
+        q = self.proj_q(enc_q)
+        r_q = self.rproj_q(enc_q)
         q = nn.functional.normalize(q, dim=1) #apply l2norm on dim channel
+        r_q = nn.functional.normalize(r_q, dim=1) #apply l2norm on dim channel
 
         # compute key features
         with torch.no_grad():  # no gradient to keys
@@ -294,15 +326,21 @@ class RMoCov1(nn.Module):
             # shuffle for making use of BN
             im_k, idx_unshuffle = self._batch_shuffle_ddp(im_k)
 
-            k = self.encoder_k(im_k)  # keys: NxC
+            enc_k = self.encoder_k(im_k)  # keys: NxC
+            enc_k = enc_k.squeeze()
+            k = self.proj_k(enc_k)
+            r_k = self.rproj_k(enc_k)
             k = nn.functional.normalize(k, dim=1)
+            r_k = nn.functional.normalize(r_k, dim=1)
 
             # undo shuffle
             k = self._batch_unshuffle_ddp(k, idx_unshuffle)
+            r_k = self._batch_unshuffle_ddp(r_k, idx_unshuffle)
 
         # compute logits
         # Einstein sum is more intuitive
         # positive logits: Nx1
+        r_pos_k, r_pos_idx, r_pos_keep = self._get_pos_rotation(ang_q, threshold=70.0)
         l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1) #inner-product
         # negative logits: NxK
         l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
@@ -317,7 +355,7 @@ class RMoCov1(nn.Module):
         labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
 
         # dequeue and enqueue
-        self._dequeue_and_enqueue(k)
+        self._dequeue_and_enqueue(k, r_k, ang_k)
 
         return logits, labels
 
