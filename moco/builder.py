@@ -186,6 +186,8 @@ class RMoCov1(nn.Module):
             dim_mlp = self.encoder_q.fc.weight.shape[1]
             self.proj_q = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), deepcopy(self.encoder_q.fc))
             self.proj_k = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), deepcopy(self.encoder_k.fc))
+            self.rproj_q = nn.Sequential(nn.Linear(dim_mlp+6, dim_mlp), nn.ReLU(), deepcopy(self.encoder_q.fc))
+            self.rproj_k = nn.Sequential(nn.Linear(dim_mlp+6, dim_mlp), nn.ReLU(), deepcopy(self.encoder_k.fc))
             self.encoder_q = nn.Sequential(*list(self.encoder_q.children())[:-1])
             self.encoder_k = nn.Sequential(*list(self.encoder_k.children())[:-1])
             #self.encoder_q.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_q.fc)
@@ -199,11 +201,11 @@ class RMoCov1(nn.Module):
         for param_pro_q, param_pro_k in zip(self.proj_q.parameters(), self.proj_k.parameters()):
             param_pro_k.data.copy_(param_pro_q.data)
             param_pro_k.requires_grad = False
-        self.rproj_q = deepcopy(self.proj_q)
-        self.rproj_k = deepcopy(self.proj_k)
-        #for rparam_q, rparam_k in zip(self.rproj_q.parameters(), self.rproj_k.parameters()):
-            #rparam_k.data.copy_(rparam_q.data)
-            #rparam_k.requires_grad = False
+        #self.rproj_q = deepcopy(self.proj_q)
+        #self.rproj_k = deepcopy(self.proj_k)
+        for rparam_q, rparam_k in zip(self.rproj_q.parameters(), self.rproj_k.parameters()):
+            rparam_k.data.copy_(rparam_q.data)
+            rparam_k.requires_grad = False
 
         # create the queue
         self.register_buffer("queue", torch.randn(dim, K))
@@ -248,7 +250,7 @@ class RMoCov1(nn.Module):
         self.queue_ptr[0] = ptr
 
     @torch.no_grad()
-    def _batch_shuffle_ddp(self, x):
+    def _batch_shuffle_ddp(self, x, ang):
         """
         Batch shuffle, for making use of BatchNorm.
         *** Only support DistributedDataParallel (DDP) model. ***
@@ -256,6 +258,7 @@ class RMoCov1(nn.Module):
         # gather from all gpus
         batch_size_this = x.shape[0]
         x_gather = concat_all_gather(x)
+        ang_gather = concat_all_gather(ang)
         batch_size_all = x_gather.shape[0]
 
         num_gpus = batch_size_all // batch_size_this
@@ -273,7 +276,7 @@ class RMoCov1(nn.Module):
         gpu_idx = torch.distributed.get_rank()
         idx_this = idx_shuffle.view(num_gpus, -1)[gpu_idx]
 
-        return x_gather[idx_this], idx_unshuffle
+        return x_gather[idx_this], ang_gather[idx_this], idx_unshuffle
 
     @torch.no_grad()
     def _batch_unshuffle_ddp(self, x, idx_unshuffle):
@@ -307,6 +310,16 @@ class RMoCov1(nn.Module):
         keep_neg = torch.where(bool_keep_inc<1, True, False)
         return (self.queue_r[:,match_idx_pos], match_idx_pos, keep_pos),(self.queue_r[:,keep_neg], keep_neg)
 
+    @torch.no_grad()
+    def _encode_angle(self, ang):
+        sin_x = torch.sin(ang)
+        cos_x = torch.cos(ang)
+        sin_xMin180 = torch.sin(ang-180.0)
+        cos_xMin180 = torch.cos(ang-180.0)
+        sin_xAdd180 = torch.sin(ang+180.0)
+        cos_xAdd180 = torch.cos(ang+180.0)
+        return torch.cat([sin_x, sin_xAdd180, sin_xMin180, cos_x, cos_xAdd180, cos_xMin180], dim=1)
+
 
     def forward(self, im_q, im_k, ang_q, ang_k):
         """
@@ -317,25 +330,27 @@ class RMoCov1(nn.Module):
             logits, targets
         """
 
+        encoded_ang_q = self._encode_angle(ang_q.reshape(-1,1))
         # compute query features
         enc_q = self.encoder_q(im_q)  # queries: NxC
         enc_q = enc_q.squeeze()
         q = self.proj_q(enc_q)
-        r_q = self.rproj_q(enc_q)
+        r_q = self.rproj_q(torch.cat([enc_q, encoded_ang_q.to(dtype=enc_q.dtype)], dim=1))
         q = nn.functional.normalize(q, dim=1) #apply l2norm on dim channel
         r_q = nn.functional.normalize(r_q, dim=1) #apply l2norm on dim channel
 
         # compute key features
         with torch.no_grad():  # no gradient to keys
+            encoded_ang_k = self._encode_angle(ang_k.reshape(-1,1))
             self._momentum_update_key_encoder()  # update the key encoder
 
             # shuffle for making use of BN
-            im_k, idx_unshuffle = self._batch_shuffle_ddp(im_k)
+            im_k, encoded_ang_k, idx_unshuffle = self._batch_shuffle_ddp(im_k, encoded_ang_k)
 
             enc_k = self.encoder_k(im_k)  # keys: NxC
             enc_k = enc_k.squeeze()
             k = self.proj_k(enc_k)
-            r_k = self.rproj_k(enc_k)
+            r_k = self.rproj_k(torch.cat([enc_k, encoded_ang_k.to(dtype=enc_k.dtype)], dim=1))
             k = nn.functional.normalize(k, dim=1)
             r_k = nn.functional.normalize(r_k, dim=1)
 
