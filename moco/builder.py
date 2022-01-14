@@ -295,12 +295,18 @@ class RMoCov1(nn.Module):
         return x_gather[idx_this]
 
     @torch.no_grad()
-    def _get_pos_rotation(self, ang, threshold):
+    def _get_pos_neg_rotation(self, ang, threshold_pos, threshold_neg):
         ang = ang.reshape(-1,1)   #[N,1]
-        match = torch.abs(ang - self.queue_angle.reshape(1,-1).repeat(ang.shape[0],1))
-        match_min, match_idx = torch.min(match, dim=1)
-        keep = torch.where(match_min <= threshold, True, False)
-        return self.queue_r[:,match_idx], match_idx, keep
+        match = torch.abs(ang - self.queue_angle.reshape(1,-1).repeat(ang.shape[0],1)) #[N, 65536]
+        #select pos
+        match_min_pos, match_idx_pos = torch.min(match, dim=1)
+        keep_pos = torch.where(match_min_pos <= threshold_pos, True, False)
+        #select neg
+        bool_keep = torch.where(match <= threshold_neg, True, False)  #[N, 65536]
+        bool_keep_inc = torch.sum(bool_keep, dim=0)
+        keep_neg = torch.where(bool_keep_inc<1, True, False)
+        return (self.queue_r[:,match_idx_pos], match_idx_pos, keep_pos),(self.queue_r[:,keep_neg], keep_neg)
+
 
     def forward(self, im_q, im_k, ang_q, ang_k):
         """
@@ -337,10 +343,13 @@ class RMoCov1(nn.Module):
             k = self._batch_unshuffle_ddp(k, idx_unshuffle)
             r_k = self._batch_unshuffle_ddp(r_k, idx_unshuffle)
 
+        # select pos and neg for angle branch
+        r_pos, r_neg = self._get_pos_neg_rotation(ang_q, threshold_pos=1.0, threshold_neg=2.0)
+        r_pos_k, r_pos_idx, r_pos_keep = r_pos
+        r_neg_k, r_neg_keep = r_neg
         # compute logits
         # Einstein sum is more intuitive
         # positive logits: Nx1
-        r_pos_k, r_pos_idx, r_pos_keep = self._get_pos_rotation(ang_q, threshold=70.0)
         l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1) #inner-product
         # negative logits: NxK
         l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
@@ -354,10 +363,28 @@ class RMoCov1(nn.Module):
         # labels: positive key indicators
         labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
 
+        # labels and logits for rotation
+        #if r_pos_k.shape[1]==0 or r_neg_k.shape[1]==0:  #no pos or no neg, return loss_for_roration=0
+        #    pass
+        #else:
+        
+        if True not in r_pos_keep:
+            r_l_pos = torch.einsum('nc,nc->n', [r_q, r_k]).unsqueeze(-1)
+            r_l_neg = torch.einsum('nc,ck->nk', [r_q, r_neg_k.clone().detach()])
+        else:
+            # positive logits for roration: N2x1, where N2 <= N
+            r_l_pos = torch.einsum('nc,nc->n', [r_q[r_pos_keep], r_pos_k[:,r_pos_keep].permute(1,0)]).unsqueeze(-1)
+            # negative logits for roration: N2xK, where N2 <= 65536
+            r_l_neg = torch.einsum('nc,ck->nk', [r_q[r_pos_keep], r_neg_k.clone().detach()])
+        # logits
+        r_logits = torch.cat([r_l_pos, r_l_neg], dim=1)
+        r_logits /= self.T
+        r_labels = torch.zeros(r_logits.shape[0], dtype=torch.long).cuda()
+
         # dequeue and enqueue
         self._dequeue_and_enqueue(k, r_k, ang_k)
 
-        return logits, labels
+        return logits, labels, r_logits, r_labels
 
 
 # utils

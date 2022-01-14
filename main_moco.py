@@ -282,19 +282,22 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
+    losses_moco = AverageMeter('Loss_moco', ':.4e')
+    losses_rotate = AverageMeter('Loss_rotate', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, losses, top1, top5],
+        [batch_time, data_time, losses, losses_moco, losses_rotate, top1, top5],
         prefix="Epoch: [{}]".format(epoch))
 
     # switch to train mode
     model.train()
 
     end = time.time()
-    for i, (imagesALL, _) in enumerate(train_loader):
+    for i, (imagesALL, targetsALL) in enumerate(train_loader):
         # measure data loading time
+        print(targetsALL)
         images = imagesALL[0]
         angles = imagesALL[1]
         data_time.update(time.time() - end)
@@ -306,19 +309,26 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
             angles[1] = angles[1].cuda(args.gpu, non_blocking=True)
 
         # compute output
-        output, target = model(im_q=images[0], im_k=images[1], ang_q=angles[0], ang_k=angles[1])
+        output, target, r_output, r_target = model(im_q=images[0], im_k=images[1], ang_q=angles[0], ang_k=angles[1])
         loss = criterion(output, target)
+        if r_output.shape[0] == 0:
+            r_loss = r_output.sum()
+        else:
+            r_loss = criterion(r_output, r_target)
+        loss_all = loss + r_loss
 
         # acc1/acc5 are (K+1)-way contrast classifier accuracy
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        losses.update(loss.item(), images[0].size(0))
+        losses_moco.update(loss.item(), images[0].size(0))
+        losses_rotate.update(r_loss.item(), r_output.size(0))
+        losses.update(loss_all.item(), images[0].size(0))
         top1.update(acc1[0], images[0].size(0))
         top5.update(acc5[0], images[0].size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
-        loss.backward()
+        loss_all.backward()
         optimizer.step()
 
         # measure elapsed time
@@ -352,7 +362,7 @@ class AverageMeter(object):
         self.val = val
         self.sum += val * n
         self.count += n
-        self.avg = self.sum / self.count
+        self.avg = self.sum / (self.count + 1e-6)
 
     def __str__(self):
         fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
