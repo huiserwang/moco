@@ -297,7 +297,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     end = time.time()
     for i, (imagesALL, targetsALL) in enumerate(train_loader):
         # measure data loading time
-        print(targetsALL)
+        #print(targetsALL)
         images = imagesALL[0]
         angles = imagesALL[1]
         data_time.update(time.time() - end)
