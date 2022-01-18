@@ -99,7 +99,7 @@ parser.add_argument('--aug-plus', action='store_true',
 parser.add_argument('--cos', action='store_true',
                     help='use cosine lr schedule')
 
-parser.add_argument('--transfer_params_to_moco', type='str')
+parser.add_argument('--transfer_params_to_moco', type=str)
 
 params_mapping = {'conv1':'0',
                     'bn1':'1',
