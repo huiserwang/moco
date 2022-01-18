@@ -99,6 +99,18 @@ parser.add_argument('--aug-plus', action='store_true',
 parser.add_argument('--cos', action='store_true',
                     help='use cosine lr schedule')
 
+parser.add_argument('--transfer_params_to_moco', type='str')
+
+params_mapping = {'conv1':'0',
+                    'bn1':'1',
+                    'relu':'2',
+                    'maxpool': '3',
+                    'layer1': '4',
+                    'layer2': '5',
+                    'layer3': '6',
+                    'layer4': '7',
+                    'avgpool': '8',
+                    'fc': '9'}
 
 def main():
     args = parser.parse_args()
@@ -197,6 +209,30 @@ def main_worker(gpu, ngpus_per_node, args):
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
+    if args.transfer_params_to_moco:
+        loc = 'cuda:{}'.format(args.gpu)
+        checkpoint = torch.load(args.transfer_params_to_moco, map_location=loc)
+        model_params = checkpoint['state_dict']
+            
+        #for name in model.state_dict():
+        for name, param in model.named_parameters():
+            if len(name.split('.'))<3:
+                if name in model_params:
+                    param.data = model_params[name]
+            else:
+                name_split = name.split('.')
+                name_split[2] = params_mapping[name_split[2]]
+                new_name = '.'.join(name_split)
+                if new_name in model_params:
+                    param.data = model_params[new_name]
+
+        print('parameters transfered!')
+        save_checkpoint({
+            'epoch': checkpoint['epoch'],
+            'arch': checkpoint['arch'],
+            'state_dict': model.state_dict(),
+            'optimizer' : checkpoint['optimizer'],
+        }, is_best=False, filename='checkpoint_transfered_{:04d}.pth.tar'.format(checkpoint['epoch']-1))
 
     # optionally resume from a checkpoint
     if args.resume:

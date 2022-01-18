@@ -11,7 +11,20 @@
             "request": "launch",
             "program": "main_moco.py",
             // "program": "${file}",
-            "args": ["/home/huiser/ssd/Datasets/ImageNet/ImageNet100", "-a", "resnet50", "--lr", "0.03", "--batch-size", "8", "-j", "8", "--dist-url", "tcp://localhost:10001", "--world-size", "1", "--rank", "0", "--multiprocessing-distributed", "--moco-t", "0.2", "--mlp", "--cos", "--aug-plus"],
+            "args": ["/home/huiser/ssd/Datasets/ImageNet/ImageNet100", "--transfer_params_to_moco", "checkpoint_0031.pth.tar","-a", "resnet50", "--lr", "0.03", "--batch-size", "8", "-j", "8", "--dist-url", "tcp://localhost:10001", "--world-size", "1", "--rank", "0", "--multiprocessing-distributed", "--moco-t", "0.2", "--mlp", "--cos", "--aug-plus"],
+            "console": "integratedTerminal",
+            "python": "/home/huiser/miniconda3/envs/mmdet/bin/python3.7",
+            "justMyCode": false
+
+        },
+        {
+            "name": "Python: script",
+            "type": "python",
+            "cwd": "/home/huiser/Desktop/Codes/moco/",
+            "request": "launch",
+            "program": "transfer_pth.py",
+            // "program": "${file}",
+            "args": ["checkpoint_0031.pth.tar", "resnet50"],
             "console": "integratedTerminal",
             "python": "/home/huiser/miniconda3/envs/mmdet/bin/python3.7",
             "justMyCode": false
